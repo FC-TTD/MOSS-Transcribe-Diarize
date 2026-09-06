@@ -25,6 +25,8 @@ MOSS-Transcribe-Diarize 0.9B is an open-source SOTA end-to-end audio understandi
 
 MOSS-Transcribe-Diarize 0.9B supports 50+ languages.
 
+**Start here:** [Run locally](#quickstart) · [Subtitle Web app](#subtitle-web-app) · [0.9B model weights](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize) · [Evaluation](#evaluation) · [Fine-tuning guide](FINETUNING.md)
+
 ## News
 
 * 2026-07-22: The subtitle Web UI now supports both Simplified Chinese and English.
