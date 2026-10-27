@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import contextvars
 import os
 import tempfile
 import fcntl
@@ -26,7 +27,7 @@ from moss_transcribe_diarize.subtitle import (
 )
 
 from .ffmpeg import burn_ass_subtitles, detect_ffmpeg, probe_video_size
-from .model_runner import ModelRunner
+from hub_runtime.runner import ModelRunner, runtime_for_jobs
 
 
 ACTIVE_STATES = {"queued", "loading_model", "transcribing", "postprocessing", "rendering"}
@@ -237,7 +238,7 @@ class JobManager:
         )
         self._jobs[job.id] = job
         self._save_job(job)
-        self._queue.put(job.id)
+        self.enqueue(job.id)
         return job
 
     def create_job_for_upload(
@@ -282,7 +283,8 @@ class JobManager:
         return job, input_path
 
     def enqueue(self, job_id: str) -> None:
-        self._queue.put(job_id)
+        runtime_for_jobs().accept_background_work()
+        self._queue.put((job_id, contextvars.copy_context()))
 
     def rerun_job(
         self,
@@ -295,6 +297,8 @@ class JobManager:
         temperature: float | None = None,
     ) -> JobRecord:
         source = self.get_job(job_id)
+        if source.status in ACTIVE_STATES or source.status == "unknown":
+            raise RuntimeError("Previous execution has not completed; do not replay")
         input_path = Path(source.input_path)
         if not input_path.exists():
             raise FileNotFoundError(str(input_path))
@@ -352,7 +356,7 @@ class JobManager:
     @serialized_job_edit
     def delete_job(self, job_id: str) -> None:
         job = self.get_job(job_id)
-        if job.status in {"queued", "loading_model", "transcribing", "postprocessing", "rendering"}:
+        if job.status in ACTIVE_STATES or job.status == "unknown":
             raise RuntimeError("Cannot delete a job while it is running.")
         self._jobs.pop(job_id, None)
         shutil.rmtree(job.job_dir, ignore_errors=True)
@@ -423,10 +427,12 @@ class JobManager:
 
     def _worker_loop(self) -> None:
         while True:
-            job_id = self._queue.get()
+            job_id, context = self._queue.get()
             try:
-                self._process_job(self.get_job(job_id))
+                context.run(self._process_job, self.get_job(job_id))
             finally:
+                if self.get_job(job_id).status != "unknown":
+                    context.run(runtime_for_jobs().complete_background_work)
                 self._queue.task_done()
 
     def _load_existing_jobs(self) -> None:
@@ -476,7 +482,8 @@ class JobManager:
             self._set_status(job, "waiting_review", 0.95, error=None)
             self._progress_save_times.pop(job.id, None)
         except Exception as exc:
-            self._set_status(job, "failed", 1.0, error=str(exc))
+            unknown = getattr(exc, "code", "") in {"execution_unknown", "node_unavailable"}
+            self._set_status(job, "unknown" if unknown else "failed", 1.0, error=str(exc))
             self._progress_save_times.pop(job.id, None)
 
     def _render_job(self, job_id: str, style: SubtitleStyle) -> None:

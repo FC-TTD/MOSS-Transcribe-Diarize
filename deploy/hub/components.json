@@ -1,0 +1,11 @@
+{
+  "project": "moss-transcribe-diarize-hub",
+  "components": {
+    "runtime": "moss-asr"
+  },
+  "sdk": "registry.ttd/ttd-hub/sdk-wheel@sha256:f8479f79ca1e5a46383f6da78930ae926b7bc7034e866cc290185121ae4ee728",
+  "nativeImages": {
+    "runtime": "registry.ttd/moss-transcribe-diarize@sha256:c60ff82a1be75afe4948511039974a6bbb255d10aceb3b0bcbac00cbd68f19e5"
+  },
+  "cache": "registry.ttd/music-native/shared-cache:buildcache"
+}

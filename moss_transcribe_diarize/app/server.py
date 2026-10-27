@@ -2,12 +2,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from moss_transcribe_diarize.inference_utils import DEFAULT_PROMPT
+from hub_runtime.contract import DEFAULT_PROMPT
 
 from .ffmpeg import detect_ffmpeg
 from .jobs import JobManager
-from .model_runner import ModelRunner
-from .vllm_runner import VllmRunner
+from hub_runtime.runner import ModelRunner
+
 
 
 def create_app(
@@ -34,7 +34,10 @@ def create_app(
         raise RuntimeError("Install fastapi, uvicorn, and python-multipart to run the local web app.") from exc
 
     app = FastAPI(title="MOSS Subtitle Studio")
+    if backend != "hf":
+        raise ValueError("This managed release preserves the approved native HF backend only")
     if backend == "vllm":
+        from .vllm_runner import VllmRunner
         if not vllm_base_url:
             raise ValueError("--vllm-base-url is required when backend='vllm'.")
         runner = VllmRunner(

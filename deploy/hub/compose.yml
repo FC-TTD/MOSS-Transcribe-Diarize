@@ -1,0 +1,85 @@
+name: ${HUB_SERVICE_ID:?}
+services:
+  runtime:
+    image: ${MODEL_IMAGE:?immutable provider image}
+    container_name: ${HUB_CONTAINER_NAME:?}
+    restart: 'no'
+    init: true
+    command: [python, -m, hub_runtime]
+    read_only: ${MODEL_READ_ONLY:-true}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ['/tmp:rw,nosuid,size=2g']
+    shm_size: ${MODEL_SHM_SIZE:-64m}
+    mem_limit: ${MODEL_MEMORY_LIMIT:-0}
+    cpus: ${MODEL_CPUS:-0}
+    pids_limit: ${MODEL_PIDS:--1}
+    environment:
+      HF_HOME: /data/hf-cache
+      HUB_SERVICE_ID: ${HUB_SERVICE_ID:?}
+      HUB_RUNTIME_VERSION: ${HUB_RUNTIME_VERSION:?}
+      HUB_RUNTIME_ACTOR_ID: ${HUB_RUNTIME_ACTOR_ID:?}
+      HUB_RUNTIME_TOKEN: ${HUB_RUNTIME_TOKEN:?private server value}
+      HUB_RUNTIME_STATE_DIR: /var/lib/hub-runtime/actors/${HUB_RUNTIME_ACTOR_ID:?}
+      HUB_NODE_URL: http://host.docker.internal:13912
+      HUB_CONTROL_HOST: '0.0.0.0'
+      HUB_CONTROL_PORT: '18083'
+      HUB_GPU_PROCESS: '1'
+      CUDA_VISIBLE_DEVICES: ''
+      NVIDIA_VISIBLE_DEVICES: ${GPU_UUID:?}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      TTD_WEBHOOK_URL: ''
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      GRADIO_ANALYTICS_ENABLED: 'False'
+      OMP_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '4'
+      NUMBA_CACHE_DIR: /tmp/numba
+      PYTORCH_KERNEL_CACHE_PATH: /tmp/torch-kernels
+    extra_hosts: ['host.docker.internal:host-gateway']
+    ports:
+      - '127.0.0.1:${HUB_CONTROL_PORT:?}:18083'
+      - '127.0.0.1:${HUB_BUSINESS_PORT:?}:8000'
+    volumes:
+      - ${HUB_STATE_PATH:?}:/var/lib/hub-runtime
+      - ${WEIGHTS_PATH:?}:/models:ro
+      - ${OUTPUT_PATH:?}:/data/runs
+      - ${HF_CACHE_PATH:?}:/data/hf-cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${GPU_UUID:?}']
+              capabilities: [gpu]
+    networks:
+      model:
+        ipv4_address: ${MODEL_ADDRESS:?}
+    labels:
+      ttd.hub.instance: ${HUB_SERVICE_ID:?}
+      ttd.hub.release: ${HUB_RELEASE_ID:?}
+      ttd.hub.dynamic_gpu: 'true'
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/runtime')"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+  entry:
+    image: ${ENTRY_IMAGE:?immutable existing Hub entry image}
+    container_name: ${HUB_SERVICE_ID:?}-entry
+    restart: unless-stopped
+    entrypoint: [/usr/local/bin/model-entry]
+    command: [--upstream, 'http://runtime:8000', --listen, ':8080']
+    ports: ['${ENTRY_BIND_IP:-127.0.0.1}:${ENTRY_BIND_PORT:?}:8080']
+    networks: [model, caddy]
+    labels:
+      ttd.hub.release: ${HUB_RELEASE_ID:?}
+      caddy_ingress_network: caddy
+      caddy: http://${MODEL_DOMAIN:?}
+      caddy.reverse_proxy: '{{upstreams 8080}}'
+networks:
+  model:
+    ipam:
+      config: [{subnet: '${MODEL_SUBNET:?}'}]
+  caddy:
+    external: true

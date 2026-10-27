@@ -1,0 +1,9 @@
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+    ttd-nest:
+      ansible_user: root
+      ansible_python_interpreter: /usr/bin/python3
+      ansible_ssh_transfer_method: piped
+      ansible_ssh_executable: "{{ playbook_dir }}/ssh-nest-via-edge.py"

@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+FROM registry.ttd/ttd-hub/sdk-wheel@sha256:f8479f79ca1e5a46383f6da78930ae926b7bc7034e866cc290185121ae4ee728 AS sdk
+FROM registry.ttd/moss-transcribe-diarize@sha256:c60ff82a1be75afe4948511039974a6bbb255d10aceb3b0bcbac00cbd68f19e5
+COPY --from=sdk --link /opt/ttd-hub-runtime /opt/ttd-hub-runtime
+COPY --link moss_transcribe_diarize /app/moss_transcribe_diarize
+COPY --link hub_runtime /app/hub_runtime
+COPY --link .source-commit /opt/provider-source-commit
+ENV PYTHONPATH=/opt/ttd-hub-runtime:/app PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+ENTRYPOINT []
+CMD ["python","-m","hub_runtime"]
+LABEL org.opencontainers.image.source="https://github.com/FC-TTD/MOSS-Transcribe-Diarize"

@@ -1,0 +1,8 @@
+**
+!moss_transcribe_diarize/
+!hub_runtime/
+!.source-commit
+!deploy/hub/Dockerfile.runtime
+**/__pycache__
+**/*.pyc
+**/._*

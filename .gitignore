@@ -19,3 +19,8 @@ runs/
 *.pth
 *.onnx
 *.log
+
+__pycache__/
+*.pyc
+.source-commit
+deploy/hub/*.env
