@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import fcntl
+from contextlib import contextmanager
+from functools import wraps
 import queue
 import shutil
 import threading
@@ -18,20 +23,42 @@ from moss_transcribe_diarize.subtitle import (
     export_json,
     export_srt,
     subtitle_segments_from_transcript,
-    write_text,
 )
 
 from .ffmpeg import burn_ass_subtitles, detect_ffmpeg, probe_video_size
 from .model_runner import ModelRunner
 
 
+ACTIVE_STATES = {"queued", "loading_model", "transcribing", "postprocessing", "rendering"}
+
+
+def write_text(path: str | Path, text: str, *, encoding: str = "utf-8") -> Path:
+    """Publish complete metadata/subtitles to readers on the other node."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, dir=target.parent,
+                                         prefix=".mtd-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+        temporary.chmod(0o644)
+        temporary.replace(target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return target
+
+
+def serialized_job_edit(method):
+    @wraps(method)
+    def wrapped(self, job_id, *args, **kwargs):
+        with self._job_edit_lock(job_id):
+            return method(self, job_id, *args, **kwargs)
+    return wrapped
+
+
 TERMINAL_STATES = {"waiting_review", "done", "failed", "cancelled"}
-
-
-class JobManagerError(Exception):
-    def __init__(self, code: str, detail: str):
-        super().__init__(detail)
-        self.code = code
 
 
 @dataclass(slots=True)
@@ -55,6 +82,7 @@ class JobRecord:
     generated_tokens: int | None = None
     elapsed_sec: float | None = None
     subtitle_style: dict[str, Any] = field(default_factory=dict)
+    worker_id: str = ""
 
     @property
     def raw_transcript_path(self) -> Path:
@@ -116,6 +144,7 @@ class JobRecord:
         temperature = data.get("temperature", inference.get("temperature"))
         return cls(
             id=str(data["id"]),
+            worker_id=str(data.get("worker_id") or ""),
             status=str(data.get("status") or "failed"),
             media_name=str(data.get("media_name") or "input.media"),
             input_path=str(data.get("input_path") or ""),
@@ -149,6 +178,7 @@ class JobManager:
         decoding: str = "greedy",
         temperature: float | None = None,
     ):
+        self.worker_id = os.environ.get("MTD_WORKER_ID", "default")
         self.runs_dir = Path(runs_dir)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.model_runner = model_runner
@@ -192,6 +222,7 @@ class JobManager:
         shutil.copyfile(source_path, input_path)
         job = JobRecord(
             id=job_id,
+            worker_id=self.worker_id,
             status="queued",
             progress=0.0,
             media_name=media_name or source_path.name,
@@ -233,6 +264,7 @@ class JobManager:
         input_path = job_dir / f"input{suffix}"
         job = JobRecord(
             id=job_id,
+            worker_id=self.worker_id,
             status="queued",
             progress=0.0,
             media_name=filename,
@@ -265,7 +297,7 @@ class JobManager:
         source = self.get_job(job_id)
         input_path = Path(source.input_path)
         if not input_path.exists():
-            raise JobManagerError("media_missing", "Media file is missing.")
+            raise FileNotFoundError(str(input_path))
         return self.create_job_from_file(
             input_path,
             media_name=source.media_name,
@@ -277,18 +309,51 @@ class JobManager:
         )
 
     def list_jobs(self) -> list[JobRecord]:
-        return sorted(self._jobs.values(), key=lambda job: job.updated_at, reverse=True)
+        jobs = []
+        for path in self.runs_dir.glob("*/job.json"):
+            try:
+                jobs.append(self.get_job(path.parent.name))
+            except (KeyError, OSError, ValueError, TypeError):
+                continue
+        return sorted(jobs, key=lambda job: job.updated_at, reverse=True)
+
+    def _job_file(self, job_id: str) -> Path:
+        if not job_id or job_id in {".", ".."} or Path(job_id).name != job_id:
+            raise KeyError(f"Unknown job: {job_id}")
+        return self.runs_dir / job_id / "job.json"
 
     def get_job(self, job_id: str) -> JobRecord:
+        path = self._job_file(job_id)
+        cached = self._jobs.get(job_id)
+        if cached and cached.worker_id == self.worker_id and cached.status in ACTIVE_STATES:
+            return cached
         try:
-            return self._jobs[job_id]
-        except KeyError as exc:
-            raise JobManagerError("job_not_found", f"Unknown job: {job_id}") from exc
+            job = JobRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except FileNotFoundError as exc:
+            self._jobs.pop(job_id, None)
+            raise KeyError(f"Unknown job: {job_id}") from exc
+        self._jobs[job_id] = job
+        return job
 
+    @contextmanager
+    def _job_edit_lock(self, job_id: str):
+        path = self._job_file(job_id).parent / ".edit.lock"
+        try:
+            handle = path.open("a")
+        except FileNotFoundError as exc:
+            raise KeyError(f"Unknown job: {job_id}") from exc
+        with handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @serialized_job_edit
     def delete_job(self, job_id: str) -> None:
         job = self.get_job(job_id)
         if job.status in {"queued", "loading_model", "transcribing", "postprocessing", "rendering"}:
-            raise JobManagerError("job_running", "Cannot delete a job while it is running.")
+            raise RuntimeError("Cannot delete a job while it is running.")
         self._jobs.pop(job_id, None)
         shutil.rmtree(job.job_dir, ignore_errors=True)
 
@@ -298,6 +363,7 @@ class JobManager:
             return []
         return json.loads(job.segments_path.read_text(encoding="utf-8"))
 
+    @serialized_job_edit
     def update_segments(
         self,
         job_id: str,
@@ -305,6 +371,8 @@ class JobManager:
         style_payload: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         job = self.get_job(job_id)
+        if job.status in ACTIVE_STATES:
+            raise RuntimeError("Cannot edit subtitles while the job is running.")
         segments = coerce_subtitle_segments(payload)
         style = SubtitleStyle.from_dict(style_payload) if style_payload is not None else None
         if style is not None:
@@ -316,12 +384,18 @@ class JobManager:
             self._touch(job, error=None)
         return [segment.to_dict() for segment in segments]
 
+    @serialized_job_edit
     def render(self, job_id: str, style_payload: dict[str, Any] | None = None) -> JobRecord:
         job = self.get_job(job_id)
+        if job.status in ACTIVE_STATES:
+            raise RuntimeError("Cannot render a job while it is running.")
         if not detect_ffmpeg().available:
-            raise JobManagerError("ffmpeg_unavailable", "ffmpeg and ffprobe are not available on PATH.")
+            raise RuntimeError("ffmpeg and ffprobe are not available on PATH.")
         if not job.segments_path.exists():
-            raise JobManagerError("subtitles_unavailable", "No subtitle segments are available for this job.")
+            raise RuntimeError("No subtitle segments are available for this job.")
+        job.worker_id = self.worker_id
+        self._jobs[job.id] = job
+        self._set_status(job, "rendering", 0.95, error=None)
         threading.Thread(
             target=self._render_job,
             args=(job.id, SubtitleStyle.from_dict(style_payload)),
@@ -344,7 +418,7 @@ class JobManager:
             raise KeyError(f"Unsupported download kind: {kind}")
         path = table[kind]
         if not path.exists():
-            raise JobManagerError("file_not_ready", f"File is not ready: {kind}")
+            raise FileNotFoundError(str(path))
         return path
 
     def _worker_loop(self) -> None:
@@ -362,7 +436,8 @@ class JobManager:
                 job = JobRecord.from_dict(data)
                 if not job.job_dir:
                     job.job_dir = str(path.parent)
-                if job.status in {"queued", "loading_model", "transcribing", "postprocessing", "rendering"}:
+                owns_job = job.worker_id == self.worker_id or (not job.worker_id and self.worker_id == "default")
+                if job.status in ACTIVE_STATES and owns_job:
                     job.status = "failed"
                     job.progress = 1.0
                     job.error = "Interrupted by previous server shutdown."
@@ -393,7 +468,7 @@ class JobManager:
             )
             job.generated_tokens = result.generated_tokens
             self._set_status(job, "postprocessing", 0.85, error=None)
-            job.raw_transcript_path.write_text(result.text, encoding="utf-8")
+            write_text(job.raw_transcript_path, result.text, encoding="utf-8")
             segments = subtitle_segments_from_transcript(result.text, postprocess=False)
             self._write_subtitle_files(job, segments)
             job.prompt_len = result.prompt_len
@@ -466,11 +541,11 @@ class JobManager:
         max_new_tokens_value = self.max_new_tokens if max_new_tokens is None else int(max_new_tokens)
         decoding_value = decoding or self.decoding
         if decoding_value not in {"greedy", "sample"}:
-            raise JobManagerError("invalid_decoding", "decoding must be greedy or sample.")
+            raise ValueError("decoding must be greedy or sample.")
         if max_length_value <= 0:
-            raise JobManagerError("invalid_max_length", "max_length must be greater than 0.")
+            raise ValueError("max_length must be greater than 0.")
         if max_new_tokens_value <= 0:
-            raise JobManagerError("invalid_max_new_tokens", "max_new_tokens must be greater than 0.")
+            raise ValueError("max_new_tokens must be greater than 0.")
 
         temperature_value = self.temperature if temperature is None else float(temperature)
         if decoding_value == "greedy":
@@ -479,7 +554,7 @@ class JobManager:
             if temperature_value is None:
                 temperature_value = 1.0
             if temperature_value <= 0:
-                raise JobManagerError("invalid_temperature", "temperature must be greater than 0.")
+                raise ValueError("temperature must be greater than 0.")
 
         return {
             "prompt": prompt_value,
@@ -496,7 +571,7 @@ class JobManager:
             self._save_job(job)
 
     def _save_job(self, job: JobRecord) -> None:
-        job.job_path.write_text(json.dumps(job.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        write_text(job.job_path, json.dumps(job.to_dict(), ensure_ascii=False, indent=2))
 
     def _should_save_live_progress(self, job_id: str) -> bool:
         now = time.time()

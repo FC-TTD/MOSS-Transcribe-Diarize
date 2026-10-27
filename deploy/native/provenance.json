@@ -1,0 +1,12 @@
+{
+  "image": "registry.ttd/moss-transcribe-diarize@sha256:c60ff82a1be75afe4948511039974a6bbb255d10aceb3b0bcbac00cbd68f19e5",
+  "source": "Read-only snapshot of the existing Backup native image and its mounted jobs.py; retain the actual API/UI and shared filesystem ownership behavior.",
+  "files": {
+    "moss_transcribe_diarize/app/jobs.py": "1d0d5b939bea24413ec567e80ebac2dd262dd211f6589e72abb47202eecd6abc",
+    "moss_transcribe_diarize/app/server.py": "4bc7d99eae40418aa6ceab2bbb8c9b78553e8dea02966f822d9ee435c28791c2",
+    "moss_transcribe_diarize/app/model_runner.py": "969fe330b8e3f26cb7340a52ba0a7fb4e58d08889ee9ad4d0d9d753f482d3cc7"
+  },
+  "native_device": "cuda:0",
+  "native_dtype": "fp32",
+  "default_max_new_tokens": 8192
+}
